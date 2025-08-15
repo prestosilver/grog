@@ -74,7 +74,7 @@ struct grug_file {
 	char *entity;
 	char *entity_type;
 
-	void *dll;
+	struct grog_file *dll;
 
 	size_t globals_size;
 	grug_init_globals_fn_t init_globals_fn;
@@ -103,7 +103,7 @@ struct grug_mod_dir {
 
 struct grug_modified {
 	char path[4096];
-	void *old_dll;
+	struct grog_file *old_dll;
 	struct grug_file file;
 };
 

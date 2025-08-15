@@ -76,9 +76,11 @@ extern bool grug_on_fns_in_safe_mode;
 extern char *grug_fn_path;
 extern char *grug_fn_name;
 
-struct grog_file *grog_open(char *path) {
-  printf("fdsa\r\n");
+void empty_on_fn() {
+  return;
+}
 
+struct grog_file *grog_open(char *path) {
   FILE *file = fopen(path, "r");
   if (file == NULL) {
     grog_ERROR("file %s dosent exist", path);
@@ -88,11 +90,7 @@ struct grog_file *grog_open(char *path) {
   fseek(file, 0L, SEEK_END);
   int size = ftell(file);
 
-  printf("size: %d\n", size);
-
   char *mapped = GetWriteMemory(size);
-  printf("map %p\n", mapped);
-
 
   fseek(file, 0L, SEEK_SET);
   fread(mapped, 1, size, file);
@@ -117,20 +115,21 @@ struct grog_file *grog_open(char *path) {
     int len = strlen(&current_data_ptr[4]);
     void * symbol = GetSymbol(root, &current_data_ptr[4]);
 
-    printf("%s %p\n", &current_data_ptr[4], symbol);
     *((void **)(&current_data_ptr[len + 4])) = symbol;
     current_data_ptr += 4 + len + sizeof(void *);
   }
 
   *result = (struct grog_file){
     .memory = mapped,
-    .initGlobalsFn = init_globals,
+    .init_globals_fn = init_globals,
     .globals_size = header->globals_size,
     .entities_size = header->entities_size,
     .resources_size = header->resources_size,
   };
 
-  result->functions_size = 0;
+  for (int i = 0; i < MAX_ON_FNS; i ++) {
+    result->on_functions[i] = &empty_on_fn;
+  }
 
   uint32_t strings_count = *(uint32_t*)(current_data_ptr);
   current_data_ptr += 4;
@@ -146,60 +145,38 @@ struct grog_file *grog_open(char *path) {
     char *fn_name = current_data_ptr + 4;
     current_data_ptr += 4 + name_len;
 
+    uint32_t fn_index = *(uint32_t*)(current_data_ptr);
+    current_data_ptr += 4;
+
     uint32_t data_len = *(uint32_t*)(current_data_ptr);
     char *fn_data = current_data_ptr + 4;
     current_data_ptr += 4 + data_len;
 
-    printf("found %s\n", fn_name);
-
-    result->functions[result->functions_size++] = fn_data;
+    result->on_functions[fn_index] = fn_data;
   }
-
-  printf("%u\n", header->globals_size);
-
-  printf("finalize %p\n", mapped);
 
   MakeExecMemory(mapped, size);
 
   return result;
 }
 
-void *grog_symbol(struct grog_file *file, char *name) {
-  if (strstr("globals_size", name))
-    return &file->globals_size;
+char **grog_get_resources(struct grog_file *file, size_t *size) {
+  *size = 0;
+  return NULL;
+}
 
-  if (strstr("resources_size", name)) {
-    static size_t tmp = 0;
-    return &tmp;
-  }
+char **grog_get_entities(struct grog_file *file, size_t *size) {
+  *size = 0;
+  return NULL;
+}
 
-  if (strstr("entities_size", name)) {
-    static size_t tmp = 0;
-    return &tmp;
-  }
-
-  if (strstr("entities", name)) {
-    return NULL;
-  }
-
-  if (strstr("resources", name)) {
-    return NULL;
-  }
-
-  if (strstr("init_globals", name))
-    return file->initGlobalsFn;
-
-  if (strstr("resources_size", name))
-    return &file->globals_size;
-
-  if (strstr("on_fns", name))
-    return &file->functions;
-
-  printf("didnt find %s\n", name);
-
+char *grog_get_entity_type(struct grog_file *file, size_t index) {
   return NULL;
 }
 
 bool grog_close(struct grog_file *file) {
+  munmap(file->memory, file->memory_size);
+  free(file);
+
   return false;
 }

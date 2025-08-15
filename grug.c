@@ -216,10 +216,6 @@ static void print_grogerror(char *function_name) {
 	grug_error("grog error %s: %s", function_name, grog_error);
 }
 
-static void *get_dll_symbol(struct grog_file *dll, char *symbol_name) {
-	return grog_symbol(dll, symbol_name);
-}
-
 //// RUNTIME ERROR HANDLING
 
 static char runtime_error_reason[420];
@@ -5097,6 +5093,7 @@ static size_t data_string_codes_size;
 struct offset {
 	char *name;
 	size_t offset;
+	size_t length;
 };
 static struct offset extern_fn_calls[MAX_GAME_FN_CALLS];
 static size_t extern_fn_calls_size;
@@ -5234,6 +5231,10 @@ static void push_helper_fn_offset(char *fn_name, size_t offset) {
 		.name = fn_name,
 		.offset = offset,
 	};
+}
+
+static void push_helper_fn_offset_end(size_t offset) {
+  helper_fn_offsets[helper_fn_offsets_size - 1].length = offset;
 }
 
 static bool has_used_extern_fn(char *name) {
@@ -6947,6 +6948,8 @@ static void compile(char *grug_path) {
 
 		compile_helper_fn(fn);
 
+		push_helper_fn_offset_end(codes_size);
+
 		text_offsets[text_offset_index++] = text_offset;
 		text_offset = codes_size;
 
@@ -6957,6 +6960,8 @@ static void compile(char *grug_path) {
 		compiling_fast_mode = true;
 		compile_helper_fn(fn);
 		compiling_fast_mode = false;
+
+		push_helper_fn_offset_end(codes_size);
 
 		text_offsets[text_offset_index++] = text_offset;
 		text_offset = codes_size;
@@ -6987,6 +6992,8 @@ static size_t code_segs_size;
 
 static size_t string_segs[MAX_DATA_STRING_CODES];
 static size_t extern_fn_segs[MAX_USED_GAME_FNS];
+
+static size_t helper_fn_segs[MAX_HELPER_FN_OFFSETS];
 
 static void push_byte(u8 byte) {
 	grug_assert(bytes_size < MAX_BYTES, "There are more than %d bytes, exceeding MAX_BYTES", MAX_BYTES);
@@ -7072,6 +7079,24 @@ static void push_code_segment(size_t n) {
   push_string_bytes_count(start, len);
 }
 
+static void push_helper_segment(size_t n) {
+  size_t len = helper_fn_offsets[n].length;
+  void* start = &codes[helper_fn_offsets[n].offset];
+
+  push_32(len);
+
+  code_segs[code_segs_size++] = (struct code_segment){
+    .code_offset = helper_fn_offsets[n].offset,
+    .bytes_offset = bytes_size,
+    .len = len,
+  };
+
+  helper_fn_segs[n] = bytes_size;
+
+  push_string_bytes_count(start, len);
+}
+
+
 static void push_grog_header() {
   push_byte('G');
   push_byte('R');
@@ -7128,7 +7153,16 @@ static void push_on_fns() {
       push_string_bytes(on_fns[i].fn_name);
       push_byte(0);
 
+      for (int idx = 0; idx < grug_entity->on_function_count; idx++) {
+        if (strstr(grug_entity->on_functions[idx].name, on_fns[i].fn_name))
+          push_32(idx);
+      }
+
       push_code_segment(fns_before_on_fns + i);
+  }
+
+  for (int i = 0; i < helper_fn_offsets_size; i++) {
+    push_helper_segment(i);
   }
 }
 
@@ -7153,7 +7187,6 @@ static void patch_code_segments() {
 
         int offset = extern_global.codes_offset - seg.code_offset + seg.bytes_offset;
         overwrite_32(mem_offset - 4 - offset, offset);
-        printf("global %Xd = %Xd %s\n", offset, mem_offset, extern_global.variable_name);
       }
     }
 
@@ -7166,7 +7199,6 @@ static void patch_code_segments() {
         int offset = string_code.code_offset - seg.code_offset + seg.bytes_offset;
         size_t mem_offset = string_segs[j];
         overwrite_32(offset - mem_offset, offset);
-        printf("string %Xd\n", offset);
       }
     }
 
@@ -7185,7 +7217,23 @@ static void patch_code_segments() {
 
         int offset = call_offset.offset - seg.code_offset + seg.bytes_offset;
         overwrite_32(mem_offset - offset - 4, offset);
-        printf("fn call %Xd\n", offset);
+      }
+
+      for (int j = 0; j < helper_fn_calls_size; j++) {
+        struct code_segment seg = code_segs[i];
+        struct offset call_offset = helper_fn_calls[j];
+        if (call_offset.offset >= seg.code_offset &&
+            call_offset.offset < seg.code_offset + seg.len
+        ) {
+          int mem_offset = -1;
+          for (int k = 0; k < helper_fn_offsets_size; k++) {
+            if (strstr(helper_fn_offsets[k].name, call_offset.name))
+              mem_offset = helper_fn_segs[k];
+          }
+
+          int offset = call_offset.offset - seg.code_offset + seg.bytes_offset;
+          overwrite_32(mem_offset - offset - 4, offset);
+        }
       }
     }
   }
@@ -7257,8 +7305,8 @@ static void reset_regenerate_modified_mods(void) {
 	directory_depth = 0;
 }
 
-static void reload_resources_from_dll(char *dll_path, i64 *resource_mtimes, size_t dll_resources_size) {
-	void *dll = grog_open(dll_path);
+static void reload_resources_from_dll(char *dll_path, i64 *resource_mtimes) {
+	struct grog_file *dll = grog_open(dll_path);
 	if (!dll) {
 		print_grogerror("grog_open");
 
@@ -7268,12 +7316,14 @@ static void reload_resources_from_dll(char *dll_path, i64 *resource_mtimes, size
 		return;
 	}
 
-	char **dll_resources = get_dll_symbol(dll, "resources");
+	size_t dll_resources_size;
+
+	char **dll_resources = grog_get_resources(dll, &dll_resources_size);
 	if (!dll_resources) {
 		if (grog_close(dll)) {
 			print_grogerror("grog_close");
 		}
-		grug_error("Retrieving resources with get_dll_symbol() failed for %s", dll_path);
+		grug_error("Retrieving resources with grog_get_resources() failed for %s", dll_path);
 	}
 
 	for (size_t i = 0; i < dll_resources_size; i++) {
@@ -7479,27 +7529,25 @@ struct grug_file *grug_get_entity_file(char *entity) {
 }
 
 static void check_that_every_entity_exists(struct grug_mod_dir dir) {
+  size_t entities_size;
+
 	for (size_t i = 0; i < dir.files_size; i++) {
 		struct grug_file file = dir.files[i];
 
-		size_t *entities_size_ptr = get_dll_symbol(file.dll, "entities_size");
-		grug_assert(entities_size_ptr, "Retrieving the entities_size variable with get_dll_symbol() failed for '%s'", file.name);
+		char **dll_entities = grog_get_entities(file.dll, &entities_size);
 
-		if (*entities_size_ptr > 0) {
-			char **dll_entities = get_dll_symbol(file.dll, "entities");
-			grug_assert(entities_size_ptr, "Retrieving the dll_entities variable with get_dll_symbol() failed for '%s'", file.name);
+		if (entities_size > 0) {
+			for (size_t dll_entity_index = 0; dll_entity_index < entities_size; dll_entity_index++) {
+  			char *dll_entity_type = grog_get_entity_type(file.dll, dll_entity_index);
+  			grug_assert(dll_entity_type, "Retrieving the dll_entity_type variable with grog_get_entity_type() failed for '%s'", file.name);
 
-			char **dll_entity_types = get_dll_symbol(file.dll, "entity_types");
-			grug_assert(entities_size_ptr, "Retrieving the dll_entity_types variable with get_dll_symbol() failed for '%s'", file.name);
-
-			for (size_t dll_entity_index = 0; dll_entity_index < *entities_size_ptr; dll_entity_index++) {
 				char *entity = dll_entities[dll_entity_index];
 
 				u32 entity_index = get_entity_index(entity);
 
 				grug_assert(entity_index != UINT32_MAX, "The entity '%s' does not exist", entity);
 
-				char *json_entity_type = dll_entity_types[dll_entity_index];
+				char *json_entity_type = dll_entity_type;
 
 				struct grug_file other_file = entity_files[entity_index];
 
@@ -7618,29 +7666,30 @@ static struct grug_file *regenerate_file(struct grug_file *file, char *dll_path,
 		print_grogerror("grog_open");
 	}
 
-	size_t *globals_size_ptr = get_dll_symbol(new_file.dll, "globals_size");
-	grug_assert(globals_size_ptr, "Retrieving the globals_size variable with get_dll_symbol() failed for %s", dll_path);
-	new_file.globals_size = *globals_size_ptr;
+	size_t globals_size = new_file.dll->globals_size;
+	new_file.globals_size = globals_size;
 
 	#pragma GCC diagnostic push
 	#pragma GCC diagnostic ignored "-Wpedantic"
-	new_file.init_globals_fn = get_dll_symbol(new_file.dll, "init_globals");
+	new_file.init_globals_fn = new_file.dll->init_globals_fn;
 	#pragma GCC diagnostic pop
 	grug_assert(new_file.init_globals_fn, "Retrieving the init_globals() function with get_dll_symbol() failed for %s", dll_path);
 
 	// on_fns is optional, so don't check for NULL
 	// Note that if an entity in mod_api.json specifies that it has on_fns that the modder can use,
 	// on_fns is guaranteed NOT to be NULL!
-	new_file.on_fns = get_dll_symbol(new_file.dll, "on_fns");
+	new_file.on_fns = &new_file.dll->on_functions;
 
-	size_t *resources_size_ptr = get_dll_symbol(new_file.dll, "resources_size");
-	size_t dll_resources_size = *resources_size_ptr;
+	size_t dll_resources_size;
+	char **dll_resources;
 
 	if (file) {
 		file->dll = new_file.dll;
 		file->globals_size = new_file.globals_size;
 		file->init_globals_fn = new_file.init_globals_fn;
 		file->on_fns = new_file.on_fns;
+
+		dll_resources = grog_get_resources(file->dll, &dll_resources_size);
 
 		if (dll_resources_size > 0) {
 			file->_resource_mtimes = realloc(file->_resource_mtimes, dll_resources_size * sizeof(i64));
@@ -7661,6 +7710,8 @@ static struct grug_file *regenerate_file(struct grug_file *file, char *dll_path,
 		new_file.entity_type = strdup(file_entity_type);
 		grug_assert(new_file.entity_type, "strdup: %s", strerror(errno));
 
+		dll_resources = grog_get_resources(new_file.dll, &dll_resources_size);
+
 		// We check dll_resources_size > 0, since whether malloc(0) returns NULL is implementation defined
 		// See https://stackoverflow.com/a/1073175/13279557
 		if (dll_resources_size > 0) {
@@ -7671,16 +7722,12 @@ static struct grug_file *regenerate_file(struct grug_file *file, char *dll_path,
 		file = push_file(dir, new_file);
 	}
 
-	if (dll_resources_size > 0) {
-		char **dll_resources = get_dll_symbol(file->dll, "resources");
+	// Initialize file->_resource_mtimes
+	for (size_t i = 0; i < dll_resources_size; i++) {
+		struct stat resource_stat;
+		grug_assert(stat(dll_resources[i], &resource_stat) == 0, "%s: %s", dll_resources[i], strerror(errno));
 
-		// Initialize file->_resource_mtimes
-		for (size_t i = 0; i < dll_resources_size; i++) {
-			struct stat resource_stat;
-			grug_assert(stat(dll_resources[i], &resource_stat) == 0, "%s: %s", dll_resources[i], strerror(errno));
-
-			file->_resource_mtimes[i] = resource_stat.st_mtime;
-		}
+		file->_resource_mtimes[i] = resource_stat.st_mtime;
 	}
 
 	return file;
@@ -7769,7 +7816,7 @@ static void reload_grug_file(char *dll_entry_path, i64 grug_file_mtime, char *gr
 
 	// Let the game developer know when they need to reload a resource
 	if (file->_resources_size > 0) {
-		reload_resources_from_dll(dll_path, file->_resource_mtimes, file->_resources_size);
+		reload_resources_from_dll(dll_path, file->_resource_mtimes);
 	}
 }
 
