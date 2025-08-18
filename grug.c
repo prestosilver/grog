@@ -118,9 +118,6 @@ static bool streq(char *a, char *b);
 }
 #endif
 
-#define USED_BY_MODS
-#define USED_BY_PROGRAMS
-
 #define BFD_HASH_BUCKET_SIZE 4051 // From https://sourceware.org/git/?p=binutils-gdb.git;a=blob;f=bfd/hash.c#l345
 
 //// UTILS
@@ -213,7 +210,7 @@ static void print_grogerror(char *function_name) {
 	// char *err = dlerror();
 	// grug_assert(err, "dlerror() was asked to find an error string, but it couldn't find one");
 	// grug_error("%s: %s", function_name, err);
-	grug_error("grog error %s: %s", function_name, grog_error);
+	grug_error("grog error %s: %s", function_name, &grog_error[0]);
 }
 
 //// RUNTIME ERROR HANDLING
@@ -6776,6 +6773,49 @@ static void compile_function_prologue(void) {
 	}
 }
 
+static u64 grug_max_rsp;
+static struct timespec grug_current_time;
+static struct timespec grug_max_time;
+
+USED_BY_MODS bool grug_is_time_limit_exceeded(void);
+USED_BY_MODS bool grug_is_time_limit_exceeded(void) {
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &grug_current_time);
+
+	if (grug_current_time.tv_sec < grug_max_time.tv_sec) {
+		return false;
+	}
+
+	if (grug_current_time.tv_sec > grug_max_time.tv_sec) {
+		return true;
+	}
+
+	return grug_current_time.tv_nsec > grug_max_time.tv_nsec;
+}
+
+USED_BY_MODS void grug_set_time_limit(void);
+USED_BY_MODS void grug_set_time_limit(void) {
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &grug_max_time);
+
+	grug_max_time.tv_sec += on_fn_time_limit_sec;
+
+	grug_max_time.tv_nsec += on_fn_time_limit_ns;
+
+	if (grug_max_time.tv_nsec >= NS_PER_SEC) {
+		grug_max_time.tv_nsec -= NS_PER_SEC;
+		grug_max_time.tv_sec++;
+	}
+}
+
+USED_BY_MODS u64* grug_get_max_rsp_addr(void);
+USED_BY_MODS u64* grug_get_max_rsp_addr(void) {
+    return &grug_max_rsp;
+}
+
+USED_BY_MODS u64 grug_get_max_rsp(void);
+USED_BY_MODS u64 grug_get_max_rsp(void) {
+    return grug_max_rsp;
+}
+
 static void compile_on_fn_impl(char *fn_name, struct argument *fn_arguments, size_t argument_count, struct statement *body_statements, size_t body_statement_count, char *grug_path, bool on_fn_calls_helper_fn, bool on_fn_contains_while_loop) {
 	add_argument_variables(fn_arguments, argument_count);
 
@@ -7001,19 +7041,6 @@ static void push_byte(u8 byte) {
 	bytes[bytes_size++] = byte;
 }
 
-static void push_string_bytes(char *str) {
-	while (*str) {
-		push_byte(*str);
-		str++;
-	}
-}
-
-static void push_string_bytes_count(char *str, size_t count) {
-	while (count --) {
-		push_byte(*str);
-		str++;
-	}
-}
 
 static void push_number(u64 n, size_t byte_count) {
 	for (; byte_count-- > 0; n >>= 8) {
@@ -7041,11 +7068,38 @@ static void push_64(u64 n) {
 	push_number(n, sizeof(u64));
 }
 
-static void push_extern_fn_segment(size_t n) {
-  size_t len = strlen(used_extern_fns[n]);
-  push_32(len);
+static void push_string_len_bytes_align(char *str) {
+  size_t start = bytes_size;
+  push_32(PLACEHOLDER_32);
+	while (*str) {
+		push_byte(*str);
+		str++;
+	}
+  push_byte('\x00');
 
-  push_string_bytes(used_extern_fns[n]);
+  while ((bytes_size) & 0x0f)
+	  push_byte('\x00');
+
+	overwrite_32(bytes_size - start - 4, start);
+}
+
+static void push_string_len_bytes_align_count(char *str, size_t count) {
+  size_t start = bytes_size;
+  push_32(PLACEHOLDER_32);
+	while (count --) {
+		push_byte(*str);
+		str++;
+	}
+	push_byte('\x00');
+
+	while ((bytes_size) & 0x0f)
+	  push_byte('\x00');
+
+	overwrite_32(bytes_size - start - 4, start);
+}
+
+static void push_extern_fn_segment(size_t n) {
+  push_string_len_bytes_align(used_extern_fns[n]);
 
   extern_fn_segs[n] = bytes_size;
 
@@ -7057,43 +7111,37 @@ static void push_string_segment(size_t n) {
   size_t len = strlen(data_string_codes[n].string) + 1;
   void* start = data_string_codes[n].string;
 
-  push_32(len);
+  string_segs[n] = bytes_size + 4;
 
-  string_segs[n] = bytes_size;
-
-  push_string_bytes_count(start, len);
+  push_string_len_bytes_align_count(start, len);
 }
 
 static void push_code_segment(size_t n) {
   size_t len = text_offsets[n + 1] - text_offsets[n];
   void* start = &codes[text_offsets[n]];
 
-  push_32(len);
-
   code_segs[code_segs_size++] = (struct code_segment){
     .code_offset = text_offsets[n],
-    .bytes_offset = bytes_size,
+    .bytes_offset = bytes_size + 4,
     .len = len,
   };
 
-  push_string_bytes_count(start, len);
+  push_string_len_bytes_align_count(start, len);
 }
 
 static void push_helper_segment(size_t n) {
   size_t len = helper_fn_offsets[n].length;
   void* start = &codes[helper_fn_offsets[n].offset];
 
-  push_32(len);
-
   code_segs[code_segs_size++] = (struct code_segment){
     .code_offset = helper_fn_offsets[n].offset,
-    .bytes_offset = bytes_size,
+    .bytes_offset = bytes_size + 4,
     .len = len,
   };
 
   helper_fn_segs[n] = bytes_size;
 
-  push_string_bytes_count(start, len);
+  push_string_len_bytes_align_count(start, len);
 }
 
 
@@ -7104,7 +7152,7 @@ static void push_grog_header() {
   push_byte('G');
 
   // pointer to grug_has_runtime_error_happened
-  push_64(0);
+  push_32(0);
 
   // pointer to grug_on_fns_in_safe_mode
   push_64(0);
@@ -7133,14 +7181,14 @@ static void patch_grog_header() {
 
 static void push_extern_fns() {
     push_32(extern_fns_size);
-    for (int i = 0; i < extern_fns_size; i++) {
+    for (size_t i = 0; i < extern_fns_size; i++) {
         push_extern_fn_segment(i);
     }
 }
 
 static void push_strings() {
   push_32(data_string_codes_size);
-  for (int i = 0; i < data_string_codes_size; i++) {
+  for (size_t i = 0; i < data_string_codes_size; i++) {
       push_string_segment(i);
   }
 }
@@ -7148,27 +7196,26 @@ static void push_strings() {
 static void push_on_fns() {
   size_t fns_before_on_fns = 1;
   push_32(on_fns_size);
-  for (int i = 0; i < on_fns_size; i++) {
-      push_32(strlen(on_fns[i].fn_name) + 1);
-      push_string_bytes(on_fns[i].fn_name);
-      push_byte(0);
+  for (size_t i = 0; i < on_fns_size; i++) {
+      push_string_len_bytes_align(on_fns[i].fn_name);
 
-      for (int idx = 0; idx < grug_entity->on_function_count; idx++) {
+      for (size_t idx = 0; idx < grug_entity->on_function_count; idx++) {
         if (strstr(grug_entity->on_functions[idx].name, on_fns[i].fn_name))
           push_32(idx);
+
       }
 
       push_code_segment(fns_before_on_fns + i);
   }
 
-  for (int i = 0; i < helper_fn_offsets_size; i++) {
+  for (size_t i = 0; i < helper_fn_offsets_size; i++) {
     push_helper_segment(i);
   }
 }
 
 static void patch_code_segments() {
-  for (int i = 0; i < code_segs_size; i++) {
-    for (int j = 0; j < used_extern_global_variables_size; j++) {
+  for (size_t i = 0; i < code_segs_size; i++) {
+    for (size_t j = 0; j < used_extern_global_variables_size; j++) {
       struct code_segment seg = code_segs[i];
       struct used_extern_global_variable extern_global = used_extern_global_variables[j];
       if (extern_global.codes_offset >= seg.code_offset &&
@@ -7176,13 +7223,13 @@ static void patch_code_segments() {
       ) {
         int mem_offset = -1;
         if (strstr("grug_has_runtime_error_happened", extern_global.variable_name)) {
-          mem_offset = 4;
+          mem_offset = 0;
         } else if (strstr("grug_on_fns_in_safe_mode", extern_global.variable_name)) {
-          mem_offset = 4 + 8;
+          mem_offset = 8;
         } else if (strstr("grug_fn_path", extern_global.variable_name)) {
-          mem_offset = 4 + 16;
+          mem_offset = 16;
         } else if (strstr("grug_fn_name", extern_global.variable_name)) {
-          mem_offset = 4 + 24;
+          mem_offset = 24;
         }
 
         int offset = extern_global.codes_offset - seg.code_offset + seg.bytes_offset;
@@ -7190,7 +7237,7 @@ static void patch_code_segments() {
       }
     }
 
-    for (int j = 0; j < data_string_codes_size; j++) {
+    for (size_t j = 0; j < data_string_codes_size; j++) {
       struct code_segment seg = code_segs[i];
       struct data_string_code string_code = data_string_codes[j];
       if (string_code.code_offset >= seg.code_offset &&
@@ -7198,18 +7245,18 @@ static void patch_code_segments() {
       ) {
         int offset = string_code.code_offset - seg.code_offset + seg.bytes_offset;
         size_t mem_offset = string_segs[j];
-        overwrite_32(offset - mem_offset, offset);
+        overwrite_32(mem_offset - 4 - offset, offset);
       }
     }
 
-    for (int j = 0; j < extern_fn_calls_size; j++) {
+    for (size_t j = 0; j < extern_fn_calls_size; j++) {
       struct code_segment seg = code_segs[i];
       struct offset call_offset = extern_fn_calls[j];
       if (call_offset.offset >= seg.code_offset &&
           call_offset.offset < seg.code_offset + seg.len
       ) {
         int mem_offset = -1;
-        for (int k = 0; k < extern_fns_size; k++) {
+        for (size_t k = 0; k < extern_fns_size; k++) {
           if (strstr(call_offset.name, used_extern_fns[k])) {
             mem_offset = extern_fn_segs[k];
           }
@@ -7219,19 +7266,15 @@ static void patch_code_segments() {
         overwrite_32(mem_offset - offset - 4, offset);
       }
 
-      for (int j = 0; j < helper_fn_calls_size; j++) {
+      for (size_t j = 0; j < helper_fn_calls_size; j++) {
         struct code_segment seg = code_segs[i];
         struct offset call_offset = helper_fn_calls[j];
         if (call_offset.offset >= seg.code_offset &&
             call_offset.offset < seg.code_offset + seg.len
         ) {
-          int mem_offset = -1;
-          for (int k = 0; k < helper_fn_offsets_size; k++) {
-            if (strstr(helper_fn_offsets[k].name, call_offset.name))
-              mem_offset = helper_fn_segs[k];
-          }
-
+          int mem_offset = get_helper_fn_offset(call_offset.name);
           int offset = call_offset.offset - seg.code_offset + seg.bytes_offset;
+
           overwrite_32(mem_offset - offset - 4, offset);
         }
       }
@@ -7305,7 +7348,7 @@ static void reset_regenerate_modified_mods(void) {
 	directory_depth = 0;
 }
 
-static void reload_resources_from_dll(char *dll_path, i64 *resource_mtimes) {
+void reload_resources_from_dll(char *dll_path, i64 *resource_mtimes) {
 	struct grog_file *dll = grog_open(dll_path);
 	if (!dll) {
 		print_grogerror("grog_open");
@@ -7317,14 +7360,7 @@ static void reload_resources_from_dll(char *dll_path, i64 *resource_mtimes) {
 	}
 
 	size_t dll_resources_size;
-
 	char **dll_resources = grog_get_resources(dll, &dll_resources_size);
-	if (!dll_resources) {
-		if (grog_close(dll)) {
-			print_grogerror("grog_close");
-		}
-		grug_error("Retrieving resources with grog_get_resources() failed for %s", dll_path);
-	}
 
 	for (size_t i = 0; i < dll_resources_size; i++) {
 		char *resource = dll_resources[i];
@@ -7360,6 +7396,7 @@ static void reload_resources_from_dll(char *dll_path, i64 *resource_mtimes) {
 		print_grogerror("grog_close");
 	}
 }
+
 
 static void regenerate_dll(char *grug_path, char *dll_path) {
 	grug_log("# Regenerating %s\n", dll_path);
@@ -7658,12 +7695,13 @@ static struct grug_mod_dir *get_subdir(struct grug_mod_dir *dir, char *name) {
 	return NULL;
 }
 
-static struct grug_file *regenerate_file(struct grug_file *file, char *dll_path, char *grug_filename, struct grug_mod_dir *dir) {
+struct grug_file *regenerate_file(struct grug_file *file, char *dll_path, char *grug_filename, struct grug_mod_dir *dir) {
 	struct grug_file new_file = {0};
 
 	new_file.dll = grog_open(dll_path);
 	if (!new_file.dll) {
 		print_grogerror("grog_open");
+		grug_assert(false, "Retrieving the init_globals() function with get_dll_symbol() failed for %s", dll_path);
 	}
 
 	size_t globals_size = new_file.dll->globals_size;
@@ -7678,7 +7716,7 @@ static struct grug_file *regenerate_file(struct grug_file *file, char *dll_path,
 	// on_fns is optional, so don't check for NULL
 	// Note that if an entity in mod_api.json specifies that it has on_fns that the modder can use,
 	// on_fns is guaranteed NOT to be NULL!
-	new_file.on_fns = &new_file.dll->on_functions;
+	new_file.on_fns = new_file.dll->on_functions;
 
 	size_t dll_resources_size;
 	char **dll_resources;

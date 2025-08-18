@@ -1,4 +1,5 @@
 #include "grog.h"
+#include "grug.h"
 
 #include <iso646.h>
 #include <stdint.h>
@@ -7,6 +8,8 @@
 #include <string.h>
 #include <dlfcn.h>
 
+#define UNUSED(x) (void)(x)
+
 #ifdef __MINGW32__
 #include <windows.h>
 HMODULE GetCurrentModule()
@@ -14,14 +17,14 @@ HMODULE GetCurrentModule()
   HMODULE hModule = NULL;
   GetModuleHandleEx(
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-    (LPCTSTR)GetCurrentModule,
+    (LPCTSTR)(size_t)GetCurrentModule,
     &hModule);
 
   return hModule;
 }
 
 void *GetSymbol(HMODULE module, char *sym) {
-  return GetProcAddress(module, sym);
+  return (void *)(uint64_t)(GetProcAddress(module, sym));
 }
 
 void *GetWriteMemory(size_t size) {
@@ -33,16 +36,20 @@ void *GetWriteMemory(size_t size) {
 void MakeExecMemory(void *buffer, size_t size) {
   DWORD dummy;
   bool ok = VirtualProtect(buffer, size, PAGE_EXECUTE_READ, &dummy);
+
+  UNUSED(ok);
 }
 
 #else
 #include <sys/mman.h>
 
+#define HMODULE void *
+
 void *GetCurrentModule() {
   return dlopen(NULL, RTLD_NOW);
 }
 
-void *GetSymbol(void *module, char *sym) {
+void *GetSymbol(HMODULE module, char *sym) {
   return dlsym(module, sym);
 }
 
@@ -50,7 +57,10 @@ void *GetWriteMemory(size_t size) {
   return mmap(0, size, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
 }
 
-void MakeExecMemory(void *memory, size_t size) {}
+void MakeExecMemory(void *memory, size_t size) {
+  UNUSED(memory);
+  UNUSED(size);
+}
 #endif
 
 char grog_error[256];
@@ -60,7 +70,6 @@ char grog_error[256];
 }
 
 struct __attribute__((packed)) grog_header {
-  uint32_t magic;
   bool *grug_has_runtime_error_happened;
   bool *grug_on_fns_in_safe_mode;
   char **grug_fn_path;
@@ -80,11 +89,14 @@ void empty_on_fn() {
   return;
 }
 
-struct grog_file *grog_open(char *path) {
-  FILE *file = fopen(path, "r");
+struct grog_file *grog_open(char *dll_path) {
+  if (dll_path ==  NULL)
+    exit(0);
+
+  FILE *file = fopen(dll_path, "r");
   if (file == NULL) {
-    grog_ERROR("file %s dosent exist", path);
-    return NULL;
+    grog_ERROR("file %s dosent exist\n", dll_path);
+    exit(0);
   }
 
   fseek(file, 0L, SEEK_END);
@@ -105,30 +117,44 @@ struct grog_file *grog_open(char *path) {
 
   struct grog_file *result = malloc(sizeof(struct grog_file));
 
-  void *root = GetCurrentModule();
+  HMODULE root = GetCurrentModule();
+
+  if (!root) {
+    printf("root is null\r\n");
+    exit(0);
+  }
 
   void *init_globals = (void *)(&mapped[sizeof(struct grog_header)]);
 
   size_t extern_functions_count = *(uint32_t*)(&mapped[header->init_globals_len + sizeof(struct grog_header)]);
   char *current_data_ptr = (char *)(&mapped[header->init_globals_len + sizeof(struct grog_header) + 4]);
   while (extern_functions_count--) {
-    int len = strlen(&current_data_ptr[4]);
-    void * symbol = GetSymbol(root, &current_data_ptr[4]);
+    uint32_t len = *(uint32_t*)(current_data_ptr);
+    void *symbol = GetSymbol(root, &current_data_ptr[4]);
+
+    printf("%s\r\n", &current_data_ptr[4]);
+
+    if (!symbol) {
+      printf("%s\r\n", &current_data_ptr[4]);
+      exit(0);
+    }
 
     *((void **)(&current_data_ptr[len + 4])) = symbol;
-    current_data_ptr += 4 + len + sizeof(void *);
+    current_data_ptr += len + sizeof(void *) + 4;
   }
 
   *result = (struct grog_file){
     .memory = mapped,
-    .init_globals_fn = init_globals,
+    .memory_size = size,
+    .init_globals_fn = (grug_init_globals_fn_t)((uint64_t)(init_globals)),
     .globals_size = header->globals_size,
     .entities_size = header->entities_size,
     .resources_size = header->resources_size,
+    .on_functions = malloc(sizeof(void *[MAX_ON_FNS]))
   };
 
   for (int i = 0; i < MAX_ON_FNS; i ++) {
-    result->on_functions[i] = &empty_on_fn;
+    result->on_functions[i] = NULL; // (void *)(uint64_t)(empty_on_fn);
   }
 
   uint32_t strings_count = *(uint32_t*)(current_data_ptr);
@@ -142,7 +168,7 @@ struct grog_file *grog_open(char *path) {
   current_data_ptr += 4;
   while (on_fns_count--) {
     uint32_t name_len = *(uint32_t*)(current_data_ptr);
-    char *fn_name = current_data_ptr + 4;
+    // char *fn_name = current_data_ptr + 4;
     current_data_ptr += 4 + name_len;
 
     uint32_t fn_index = *(uint32_t*)(current_data_ptr);
@@ -155,28 +181,36 @@ struct grog_file *grog_open(char *path) {
     result->on_functions[fn_index] = fn_data;
   }
 
-  MakeExecMemory(mapped, size);
+  MakeExecMemory(result->memory, result->memory_size);
 
   return result;
 }
 
 char **grog_get_resources(struct grog_file *file, size_t *size) {
+  UNUSED(file);
+
   *size = 0;
   return NULL;
 }
 
 char **grog_get_entities(struct grog_file *file, size_t *size) {
+  UNUSED(file);
+
   *size = 0;
   return NULL;
 }
 
 char *grog_get_entity_type(struct grog_file *file, size_t index) {
+  UNUSED(file);
+  UNUSED(index);
+
   return NULL;
 }
 
 bool grog_close(struct grog_file *file) {
-  munmap(file->memory, file->memory_size);
-  free(file);
+  UNUSED(file);
+  // munmap(file->memory, file->memory_size);
+  // free(file);
 
   return false;
 }

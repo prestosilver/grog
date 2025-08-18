@@ -8,12 +8,6 @@
 
 #define MAX_ON_FNS 420420
 
-//// Function typedefs
-
-typedef void (*grug_runtime_error_handler_t)(char *reason, enum grug_runtime_error_type type, char *on_fn_name, char *on_fn_path);
-
-typedef void (*grug_init_globals_fn_t)(void *globals, uint64_t id);
-
 //// Structs
 
 struct grog_file {
@@ -24,7 +18,7 @@ struct grog_file {
   size_t entities_size;
   size_t resources_size;
 
-  void *on_functions[MAX_ON_FNS];
+  void **on_functions;
   grug_init_globals_fn_t init_globals_fn;
 };
 

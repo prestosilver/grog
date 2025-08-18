@@ -20,7 +20,7 @@ enum grug_runtime_error_type {
 
 //// Function typedefs
 
-typedef void (*grug_runtime_error_handler_t)(char *reason, enum grug_runtime_error_type type, char *on_fn_name, char *on_fn_path);
+typedef void (*grug_runtime_error_handler_t)(const char *reason, enum grug_runtime_error_type type, const char *on_fn_name, const char *on_fn_path);
 
 typedef void (*grug_init_globals_fn_t)(void *globals, uint64_t id);
 
@@ -66,6 +66,14 @@ void grug_toggle_on_fns_mode(void);
 
 #define MAX_RELOADS 6969
 #define MAX_RESOURCE_RELOADS 6969
+
+#ifdef __MINGW32__
+#define USED_BY_MODS __declspec(dllexport)
+#define USED_BY_PROGRAMS
+#else
+#define USED_BY_MODS
+#define USED_BY_PROGRAMS
+#endif
 
 //// Structs
 

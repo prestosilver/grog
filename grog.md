@@ -12,6 +12,11 @@ struct on_fn {
     char data[data_len];
 };
 
+struct grog_string {
+    u32 name_len;
+    char name[name_len];
+};
+    
 struct grog_data {
     u64 grug_has_runtime_error_happened;
     u64 grug_on_fns_in_safe_mode;
