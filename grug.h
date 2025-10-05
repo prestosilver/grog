@@ -71,6 +71,10 @@ void grug_set_mod_dir_enabled(struct grug_mod_dir *mod);
 void grug_set_mod_dir_disabled(struct grug_mod_dir *mod);
 bool grug_is_mod_dir_enabled(const struct grug_mod_dir *mod) __attribute__((warn_unused_result));
 
+// Adds a virtual mod to grug
+void grug_add_virtual_mod(char *name, char *path);
+void grug_remove_virtual_mod(char *name);
+
 //// Defines
 
 #define MAX_RELOADS 6969
@@ -94,6 +98,11 @@ struct grug_file {
 	size_t _resources_size;
 
 	bool _seen;
+};
+
+struct grug_virtual_mod {
+	const char *name;
+	const char *path;
 };
 
 struct grug_mod_dir {
@@ -129,7 +138,6 @@ struct grug_error {
 };
 
 //// Globals
-
 extern struct grug_mod_dir grug_mods;
 
 extern struct grug_modified grug_reloads[MAX_RELOADS];

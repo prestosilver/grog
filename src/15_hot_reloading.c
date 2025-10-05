@@ -6,6 +6,7 @@
 #define MAX_ENTITY_STRINGS_CHARACTERS 420420
 #define MAX_ENTITY_NAME_LENGTH 420
 #define MAX_DIRECTORY_DEPTH 42
+#define MAX_VIRTUAL_MODS 42042
 
 USED_BY_PROGRAMS struct grug_mod_dir grug_mods;
 
@@ -19,6 +20,9 @@ static u32 buckets_entities[MAX_ENTITIES];
 static u32 chains_entities[MAX_ENTITIES];
 static struct grug_file entity_files[MAX_ENTITIES];
 static size_t entities_size;
+
+static size_t virtual_grug_mods_size;
+static struct grug_virtual_mod virtual_grug_mods[MAX_VIRTUAL_MODS];
 
 USED_BY_PROGRAMS struct grug_modified_resource grug_resource_reloads[MAX_RESOURCE_RELOADS];
 USED_BY_PROGRAMS size_t grug_resource_reloads_size;
@@ -674,6 +678,13 @@ static void validate_about_file(const char *about_json_path) {
 	}
 }
 
+static struct grug_mod_dir *get_virtdir(struct grug_virtual_mod *vmod, struct grug_mod_dir *dir) {
+	static char dll_entry_path[STUPID_MAX_PATH];
+	grug_assert(snprintf(dll_entry_path, sizeof(dll_entry_path), "%s/_VIRT%s", dll_root_dir_path, vmod->name) >= 0, "Filling the variable 'dll_entry_path' failed");
+
+	reload_entry("", vmod->path, dll_entry_path, dir);
+}
+
 // Cases:
 // 1. "" => ""
 // 2. "/" => ""
@@ -739,6 +750,19 @@ static void reload_modified_mods(void) {
 	grug_assert(errno == 0, "readdir: %s", strerror(errno));
 
 	closedir(dirp);
+
+	for (size_t i = 0; i < virtual_grug_mods_size; i++) {
+		struct grug_mod_dir *subdir = get_virtdir(&virtual_grug_mods[i], &grug_mods);
+
+		if (!subdir) {
+			static char name[STUPID_MAX_PATH];
+			grug_assert(snprintf(name, sizeof(name), "_VIRT%s", name) >= 0, "Filling the variable 'name' failed");
+
+			struct grug_mod_dir inserted_subdir = {.name = name};
+			grug_assert(inserted_subdir.name, "strdup: %s", strerror(errno));
+			subdir = push_subdir(dir, inserted_subdir);
+		}
+	}
 
 	// If the directory used to contain a mod that doesn't exist anymore, free it
 	for (size_t i = dir->dirs_size; i > 0;) {
@@ -838,4 +862,28 @@ void grug_set_mod_dir_disabled(struct grug_mod_dir *mod) {
 
 bool grug_is_mod_dir_enabled(const struct grug_mod_dir *mod) {
 	return !mod->_disabled;	
+}
+
+void grug_add_virtual_mod(char *name, char *path) {
+	struct grug_virtual_mod mod = {.name = strdup(name), .path = strdup(path)};
+	grug_assert(mod.name, "strdup: %s", strerror(errno));
+	grug_assert(mod.path, "strdup: %s", strerror(errno));
+
+	virtual_grug_mods[virtual_grug_mods_size++] = mod;
+	
+	grug_assert(virtual_grug_mods_size < MAX_VIRTUAL_MODS, "There are more than %d virtual grug mods, exceeding MAX_VIRTUAL_MODS", MAX_VIRTUAL_MODS);
+}
+
+void grug_remove_virtual_mod(char *name) {
+	size_t new_length = 0;
+	for (size_t i = 0; i < virtual_grug_mods_size; i++) {
+		if (strcmp(name, virtual_grug_mods[i].name) != 0) {
+			free(virtual_grug_mods[i].name);
+			free(virtual_grug_mods[i].path);
+		} else new_length ++;
+
+		virtual_grug_mods[new_length - 1] = virtual_grug_mods[i];
+	}
+
+	virtual_grug_mods_size = new_length;
 }
