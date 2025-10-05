@@ -1,5 +1,5 @@
 // NOTE: DON'T EDIT THIS FILE! IT IS AUTOMATICALLY REGENERATED BASED ON THE FILES IN src/
-// Regenerated on 2025-10-05T14:47:00Z
+// Regenerated on 2025-10-05T15:06:22Z
 
 //// GRUG DOCUMENTATION
 //
@@ -9672,14 +9672,8 @@ static void reload_modified_mods(void) {
 	for (size_t i = 0; i < virtual_grug_mods_size; i++) {
 		struct grug_mod_dir *subdir = get_virtdir(&virtual_grug_mods[i], &grug_mods);
 
-		if (!subdir) {
-			static char name[STUPID_MAX_PATH];
-			grug_assert(snprintf(name, sizeof(name), "_VIRT%s", name) >= 0, "Filling the variable 'name' failed");
-
-			struct grug_mod_dir inserted_subdir = {.name = name};
-			grug_assert(inserted_subdir.name, "strdup: %s", strerror(errno));
-			subdir = push_subdir(dir, inserted_subdir);
-		}
+		subdir = push_subdir(dir, subdir);
+		subdir->_seen = true;
 	}
 
 	// If the directory used to contain a mod that doesn't exist anymore, free it
